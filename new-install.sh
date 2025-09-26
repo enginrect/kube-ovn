@@ -5078,6 +5078,8 @@ spec:
               value: "unix:path=/host/var/run/dbus/system_bus_socket"
             - name: KUBERNETES_SERVICE_HOST
               value: "$EXTERNAL_KUBE_API_SERVER_HOST"
+            - name: KUBERNETES_SERVICE_PORT
+              value: "6443"
           volumeMounts:
             - name: usr-local-sbin
               mountPath: /usr/local/sbin
