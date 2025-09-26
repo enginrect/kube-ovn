@@ -4695,6 +4695,15 @@ spec:
           operator: Exists
         - key: CriticalAddonsOnly
           operator: Exists
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-type
+                    operator: NotIn
+                    values:
+                      - external
       priorityClassName: system-node-critical
       serviceAccountName: kube-ovn-cni
       hostNetwork: true
@@ -4867,6 +4876,270 @@ spec:
           limits:
             cpu: 1000m
             memory: 1Gi
+      nodeSelector:
+        kubernetes.io/os: "linux"
+      volumes:
+        - name: usr-local-sbin
+          emptyDir: {}
+        - name: host-modules
+          hostPath:
+            path: /lib/modules
+        - name: xtables-lock
+          hostPath:
+            path: /run/xtables.lock
+            type: FileOrCreate
+        - name: shared-dir
+          hostPath:
+            path: $KUBELET_DIR/pods
+        - name: systemid
+          hostPath:
+            path: /etc/origin/openvswitch
+        - name: ovs-ipsec-keys
+          hostPath:
+            path: /etc/origin/ovs_ipsec_keys
+        - name: host-run-ovs
+          hostPath:
+            path: /run/openvswitch
+        - name: host-run-ovn
+          hostPath:
+            path: /run/ovn
+        - name: cni-conf
+          hostPath:
+            path: $CNI_CONF_DIR
+        - name: cni-bin
+          hostPath:
+            path: $CNI_BIN_DIR
+        - name: host-ns
+          hostPath:
+            path: /var/run/netns
+        - name: host-dbus
+          hostPath:
+            path: /var/run/dbus
+        - name: host-log-ovs
+          hostPath:
+            path: $LOG_DIR/openvswitch
+        - name: kube-ovn-log
+          hostPath:
+            path: $LOG_DIR/kube-ovn
+        - name: host-log-ovn
+          hostPath:
+            path: $LOG_DIR/ovn
+        - name: localtime
+          hostPath:
+            path: /etc/localtime
+        - name: local-bin
+          hostPath:
+            path: /usr/local/bin
+---
+kind: DaemonSet
+apiVersion: apps/v1
+metadata:
+  name: kube-ovn-cni-external
+  namespace: kube-system
+  annotations:
+    kubernetes.io/description: |
+      This daemon set launches the kube-ovn cni daemon.
+spec:
+  selector:
+    matchLabels:
+      app: kube-ovn-cni-external
+  template:
+    metadata:
+      labels:
+        kube-ovn.io/component: cni
+        app: kube-ovn-cni-external
+        component: network
+        type: infra
+    spec:
+      tolerations:
+        - effect: NoSchedule
+          operator: Exists
+        - effect: NoExecute
+          operator: Exists
+        - key: CriticalAddonsOnly
+          operator: Exists
+      priorityClassName: system-node-critical
+      serviceAccountName: kube-ovn-cni
+      hostNetwork: true
+      hostPID: true
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-type
+                    operator: In
+                    values: [ "external" ]
+      initContainers:
+        - name: hostpath-init
+          image: "$REGISTRY/kube-ovn:$VERSION"
+          command:
+            - sh
+            - -xec
+            - iptables -V
+          securityContext:
+            allowPrivilegeEscalation: true
+            capabilities:
+              drop:
+                - ALL
+            privileged: true
+            runAsUser: 0
+          volumeMounts:
+            - name: usr-local-sbin
+              mountPath: /usr/local/sbin
+            - mountPath: /run/xtables.lock
+              name: xtables-lock
+              readOnly: false
+            - mountPath: /var/run/netns
+              name: host-ns
+              readOnly: false
+            - name: kube-ovn-log
+              mountPath: /var/log/kube-ovn
+        - name: install-cni
+          image: "$REGISTRY/kube-ovn:$VERSION"
+          imagePullPolicy: $IMAGE_PULL_POLICY
+          command:
+            - /kube-ovn/install-cni.sh
+            - --cni-conf-name=${CNI_CONFIG_PRIORITY}-kube-ovn.conflist
+          securityContext:
+            runAsUser: 0
+            privileged: true
+          volumeMounts:
+            - mountPath: /opt/cni/bin
+              name: cni-bin
+            - mountPath: /etc/cni/net.d
+              name: cni-conf
+            - mountPath: /usr/local/bin
+              name: local-bin
+      containers:
+        - name: cni-server
+          image: "$REGISTRY/kube-ovn:$VERSION"
+          imagePullPolicy: $IMAGE_PULL_POLICY
+          command:
+            - bash
+            - /kube-ovn/start-cniserver.sh
+          args:
+            - --enable-mirror=$ENABLE_MIRROR
+            - --enable-arp-detect-ip-conflict=$ENABLE_ARP_DETECT_IP_CONFLICT
+            - --encap-checksum=true
+            - --service-cluster-ip-range=$SVC_CIDR
+            - --iface=${IFACE}
+            - --dpdk-tunnel-iface=${DPDK_TUNNEL_IFACE}
+            - --network-type=$TUNNEL_TYPE
+            - --default-interface-name=$VLAN_INTERFACE_NAME
+            - --logtostderr=false
+            - --alsologtostderr=true
+            - --log_file=/var/log/kube-ovn/kube-ovn-cni.log
+            - --log_file_max_size=200
+            - --enable-metrics=$ENABLE_METRICS
+            - --kubelet-dir=$KUBELET_DIR
+            - --enable-tproxy=$ENABLE_TPROXY
+            - --ovs-vsctl-concurrency=$OVS_VSCTL_CONCURRENCY
+            - --secure-serving=${SECURE_SERVING}
+            - --enable-ovn-ipsec=$ENABLE_OVN_IPSEC
+            - --set-vxlan-tx-off=$SET_VXLAN_TX_OFF
+          securityContext:
+            runAsUser: 0
+            privileged: false
+            capabilities:
+              add:
+                - NET_ADMIN
+                - NET_BIND_SERVICE
+                - NET_RAW
+                - SYS_ADMIN
+                - SYS_NICE
+                - SYS_PTRACE
+          env:
+            - name: ENABLE_SSL
+              value: "$ENABLE_SSL"
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: KUBE_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: POD_IPS
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIPs
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: ENABLE_BIND_LOCAL_IP
+              value: "$ENABLE_BIND_LOCAL_IP"
+            - name: DBUS_SYSTEM_BUS_ADDRESS
+              value: "unix:path=/host/var/run/dbus/system_bus_socket"
+            - name: KUBERNETES_SERVICE_HOST
+              value: "$EXTERNAL_KUBE_API_SERVER_HOST"
+          volumeMounts:
+            - name: usr-local-sbin
+              mountPath: /usr/local/sbin
+            - name: host-modules
+              mountPath: /lib/modules
+              readOnly: true
+            - mountPath: /run/xtables.lock
+              name: xtables-lock
+              readOnly: false
+            - name: shared-dir
+              mountPath: $KUBELET_DIR/pods
+            - mountPath: /etc/openvswitch
+              name: systemid
+              readOnly: true
+            - mountPath: /etc/ovs_ipsec_keys
+              name: ovs-ipsec-keys
+            - mountPath: /run/openvswitch
+              name: host-run-ovs
+              mountPropagation: HostToContainer
+            - mountPath: /run/ovn
+              name: host-run-ovn
+            - mountPath: /host/var/run/dbus
+              name: host-dbus
+              mountPropagation: HostToContainer
+            - mountPath: /var/run/netns
+              name: host-ns
+              mountPropagation: HostToContainer
+            - mountPath: /var/log/kube-ovn
+              name: kube-ovn-log
+            - mountPath: /var/log/openvswitch
+              name: host-log-ovs
+            - mountPath: /var/log/ovn
+              name: host-log-ovn
+            - mountPath: /etc/localtime
+              name: localtime
+              readOnly: true
+          livenessProbe:
+            failureThreshold: 3
+            initialDelaySeconds: 30
+            periodSeconds: 7
+            successThreshold: 1
+            httpGet:
+              port: 10665
+              path: /livez
+              scheme: ${PROBE_HTTP_SCHEME}
+            timeoutSeconds: 5
+          readinessProbe:
+            failureThreshold: 3
+            periodSeconds: 7
+            successThreshold: 1
+            httpGet:
+              port: 10665
+              path: /readyz
+              scheme: ${PROBE_HTTP_SCHEME}
+            timeoutSeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 100Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
       nodeSelector:
         kubernetes.io/os: "linux"
       volumes:
@@ -5443,7 +5716,7 @@ metadata:
 spec:
   ${SVC_YAML_IPFAMILYPOLICY}
   selector:
-    app: kube-ovn-cni
+    kube-ovn.io/component: cni
   ports:
     - port: 10665
       name: metrics
